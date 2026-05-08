@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Megamarsch Sim</title>
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+    <style>
+      html, body, #map { margin: 0; padding: 0; height: 100%; width: 100%; font-family: -apple-system, system-ui, sans-serif; }
+      body { background: #0d1117; color: #e6edf3; }
+      #map { position: absolute; inset: 0; }
+      #panel {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        background: rgba(13, 17, 23, 0.92); padding: 14px 16px; border-radius: 10px;
+        border: 1px solid #30363d; min-width: 260px;
+        backdrop-filter: blur(8px);
+      }
+      #panel h1 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
+      #panel .stat { display: flex; justify-content: space-between; font-size: 12px; margin: 4px 0; color: #8b949e; }
+      #panel .stat b { color: #e6edf3; font-variant-numeric: tabular-nums; }
+      #controls {
+        position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 10;
+        background: rgba(13, 17, 23, 0.92); padding: 12px 18px; border-radius: 10px;
+        border: 1px solid #30363d; display: flex; gap: 14px; align-items: center;
+        backdrop-filter: blur(8px);
+      }
+      #controls label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; }
+      #controls input[type=range] { width: 280px; }
+      #controls button {
+        background: #238636; color: white; border: 0; padding: 6px 12px;
+        border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 600;
+      }
+      #controls button.paused { background: #6e7681; }
+      #time-display { font-variant-numeric: tabular-nums; min-width: 64px; }
+
+      /* Sign-up modal */
+      #signup-overlay {
+        position: absolute; inset: 0; z-index: 100;
+        background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px);
+        display: flex; align-items: center; justify-content: center;
+      }
+      #signup-overlay[hidden] { display: none; }
+      #signup-card {
+        background: #161b22; border: 1px solid #30363d; border-radius: 14px;
+        padding: 28px 32px; width: min(480px, 92vw); color: #e6edf3;
+      }
+      #signup-card h2 { margin: 0 0 4px; font-size: 20px; }
+      #signup-card p.sub { margin: 0 0 22px; font-size: 13px; color: #8b949e; }
+      #signup-card label.field { display: block; font-size: 12px; color: #8b949e;
+        text-transform: uppercase; letter-spacing: 0.05em; margin: 18px 0 8px; }
+      #signup-card input[type=text] {
+        width: 100%; padding: 10px 12px; box-sizing: border-box;
+        background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+        color: #e6edf3; font-size: 14px; font-family: inherit;
+      }
+      #signup-card input[type=text]:focus { outline: none; border-color: #1f6feb; }
+      .band-options { display: flex; flex-direction: column; gap: 6px; }
+      .band-row {
+        display: flex; gap: 12px; padding: 10px 12px; border-radius: 8px;
+        border: 1px solid #30363d; cursor: pointer; transition: all 0.15s;
+        align-items: center;
+      }
+      .band-row:hover { border-color: #58a6ff; background: rgba(88, 166, 255, 0.06); }
+      .band-row.active { border-color: #58a6ff; background: rgba(88, 166, 255, 0.1); }
+      .band-row input { margin: 0; accent-color: #58a6ff; }
+      .band-row .band-info { flex: 1; }
+      .band-row .band-name {
+        display: flex; align-items: center; gap: 8px;
+        font-size: 14px; font-weight: 600; margin-bottom: 2px;
+      }
+      .band-row .band-blurb { font-size: 12px; color: #8b949e; line-height: 1.35; }
+      .band-row .band-finish {
+        font-size: 11px; color: #8b949e; font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .band-color-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+      #signup-submit {
+        width: 100%; margin-top: 22px; padding: 11px;
+        background: #238636; color: white; border: 0; border-radius: 8px;
+        font-size: 14px; font-weight: 600; cursor: pointer;
+      }
+      #signup-submit:disabled { background: #30363d; cursor: not-allowed; color: #8b949e; }
+      #signup-submit:not(:disabled):hover { background: #2ea043; }
+      #signup-error { color: #f85149; font-size: 12px; margin-top: 8px; min-height: 16px; }
+
+      /* "My walker" overview card */
+      #my-walker-card[hidden] { display: none; }
+      #my-walker-card {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid #30363d;
+      }
+      .mw-header {
+        display: flex; justify-content: space-between; align-items: baseline;
+        margin-bottom: 2px;
+      }
+      .mw-header .mw-name { color: #58a6ff; font-weight: 700; font-size: 14px; }
+      .mw-header .mw-status {
+        font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
+        padding: 2px 6px; border-radius: 4px; background: #21262d; color: #8b949e;
+      }
+      .mw-status.walking { background: rgba(35, 134, 54, 0.25); color: #56d364; }
+      .mw-status.finished { background: rgba(56, 139, 253, 0.25); color: #79c0ff; }
+      .mw-status.dnf { background: rgba(248, 81, 73, 0.2); color: #f85149; }
+      .mw-band { font-size: 11px; color: #8b949e; margin-bottom: 8px; }
+      .mw-stats {
+        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+        margin: 8px 0 10px;
+      }
+      .mw-stat { background: #0d1117; padding: 6px 8px; border-radius: 6px; }
+      .mw-stat .mw-stat-label {
+        font-size: 9px; color: #6e7681; text-transform: uppercase;
+        letter-spacing: 0.07em; line-height: 1.4;
+      }
+      .mw-stat .mw-stat-value {
+        font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums;
+        color: #e6edf3; line-height: 1.2;
+      }
+      .mw-histogram { margin-bottom: 6px; }
+      .mw-histogram svg { display: block; width: 100%; height: 56px; overflow: visible; }
+      .mw-axis { font-size: 9px; color: #6e7681; display: flex; justify-content: space-between; }
+      #change-walker {
+        background: none; border: 0; color: #58a6ff; font-size: 11px;
+        cursor: pointer; padding: 0; margin-top: 6px;
+      }
+      #change-walker:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="panel">
+      <h1>Megamarsch München — Sim</h1>
+      <div class="stat"><span>Walkers</span><b id="stat-walkers">—</b></div>
+      <div class="stat"><span>On route</span><b id="stat-active">—</b></div>
+      <div class="stat"><span>Finished</span><b id="stat-finished">—</b></div>
+      <div class="stat"><span>DNF</span><b id="stat-dnf">—</b></div>
+      <div class="stat"><span>Sim time</span><b id="stat-time">—</b></div>
+      <div id="my-walker-card" hidden>
+        <div class="mw-header">
+          <span class="mw-name" id="my-walker-name">—</span>
+          <span class="mw-status" id="my-walker-status">—</span>
+        </div>
+        <div class="mw-band" id="my-walker-band">—</div>
+        <div class="mw-stats">
+          <div class="mw-stat">
+            <div class="mw-stat-label">Distance</div>
+            <div class="mw-stat-value" id="my-walker-km">—</div>
+          </div>
+          <div class="mw-stat">
+            <div class="mw-stat-label">Place</div>
+            <div class="mw-stat-value" id="my-walker-rank">—</div>
+          </div>
+          <div class="mw-stat">
+            <div class="mw-stat-label">Finish ETA</div>
+            <div class="mw-stat-value" id="my-walker-eta">—</div>
+          </div>
+        </div>
+        <div class="mw-histogram">
+          <svg id="my-walker-svg" viewBox="0 0 100 32" preserveAspectRatio="none"></svg>
+          <div class="mw-axis"><span>0 km</span><span>50</span><span>100</span></div>
+        </div>
+        <button id="change-walker" type="button">change walker</button>
+      </div>
+    </div>
+    <div id="signup-overlay" hidden>
+      <div id="signup-card">
+        <h2>Send a walker on the Megamarsch</h2>
+        <p class="sub">100 km from Munich to Garmisch-Partenkirchen. 24-hour cutoff. Pick a fitness band — your walker will set off at the current sim moment and you can watch them progress.</p>
+        <label class="field" for="signup-name">Walker name</label>
+        <input id="signup-name" type="text" maxlength="40" placeholder="Marie, Lukas, Bigfoot…" autocomplete="off" />
+        <label class="field">Fitness band</label>
+        <div class="band-options" id="band-options"></div>
+        <button id="signup-submit" type="button" disabled>Send walker</button>
+        <div id="signup-error"></div>
+      </div>
+    </div>
+    <div id="controls">
+      <button id="play-pause">Pause</button>
+      <label for="speed">Speed</label>
+      <span id="speed-display">60×</span>
+      <input id="speed" type="range" min="1" max="500" value="60" />
+      <span id="time-display">00:00</span>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

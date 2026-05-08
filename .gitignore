@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.local
+.DS_Store
+*.log
+.vite/
+
+# tsc has --noEmit set, but if anyone misconfigures it,
+# don't ever commit compiled output next to sources.
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
+
