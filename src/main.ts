@@ -24,6 +24,7 @@ import {
 import {
   parseGpxFile,
   fillMissingRoutePrefix,
+  fillMissingRouteSuffix,
   buildReplayTrips,
   maxTripTime,
   kmAtSimSec,
@@ -278,6 +279,12 @@ async function main() {
           track,
           route.points,
           (km) => positionAtKm(route, km),
+        );
+        track = fillMissingRouteSuffix(
+          track,
+          route.points,
+          (km) => positionAtKm(route, km),
+          ROUTE_KM,
         );
         // Default name from GPX metadata or filename.
         const name = track.name.trim() || file.name.replace(/\.(gpx|gpx\.txt|xml)$/i, "");

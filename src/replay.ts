@@ -343,6 +343,75 @@ export function fillMissingRoutePrefix(
 }
 
 /**
+ * Extend a GPX track that stops before the finish line by synthesizing
+ * the remaining distance along the route at the walker's recent pace.
+ */
+export function fillMissingRouteSuffix(
+  track: ReplayTrack,
+  _routePoints: Array<{ lon: number; lat: number; cumKm: number }>,
+  positionAtKmFn: (km: number) => [number, number],
+  routeTotalKm: number,
+): ReplayTrack {
+  // Only extend if we're short by more than 500m.
+  const remaining = routeTotalKm - track.totalKm;
+  if (remaining < 0.5) return track;
+
+  // Estimate pace from the last 5km (or last 20% of track, whichever is smaller).
+  const lookbackKm = Math.min(5, track.totalKm * 0.2);
+  const lookbackStart = track.totalKm - lookbackKm;
+  let startIdx = 0;
+  for (let i = track.distances.length - 1; i >= 0; i--) {
+    if (track.distances[i] <= lookbackStart) {
+      startIdx = i;
+      break;
+    }
+  }
+  const segKm = track.totalKm - track.distances[startIdx];
+  const segTime = (track.timestamps[track.timestamps.length - 1] - track.timestamps[startIdx]) / 3600;
+  const recentPace = segTime > 0 ? segKm / segTime : 3.5; // km/h
+  const pace = Math.max(2.5, Math.min(8.0, recentPace));
+
+  // Generate suffix points along the route from current end to finish.
+  const suffixPath: Array<[number, number]> = [];
+  const suffixTimestamps: number[] = [];
+  const startSec = track.timestamps[track.timestamps.length - 1];
+  const stepKm = 0.05;
+  for (let km = track.totalKm + stepKm; km <= routeTotalKm; km += stepKm) {
+    suffixPath.push(positionAtKmFn(km));
+    const t = startSec + ((km - track.totalKm) / pace) * 3600;
+    suffixTimestamps.push(t);
+  }
+  // Ensure the last point is at exactly routeTotalKm.
+  if (suffixPath.length > 0) {
+    const lastKm = track.totalKm + suffixPath.length * stepKm;
+    if (lastKm < routeTotalKm - 0.01) {
+      suffixPath.push(positionAtKmFn(routeTotalKm));
+      suffixTimestamps.push(startSec + (remaining / pace) * 3600);
+    }
+  }
+
+  const mergedPath = [...track.path, ...suffixPath];
+  const mergedTimestamps = [...track.timestamps, ...suffixTimestamps];
+
+  // Recalculate distances.
+  const recalcDist: number[] = [0];
+  let cum = 0;
+  for (let i = 1; i < mergedPath.length; i++) {
+    cum += haversineKm(mergedPath[i - 1], mergedPath[i]);
+    recalcDist.push(cum);
+  }
+
+  return {
+    ...track,
+    path: mergedPath,
+    timestamps: mergedTimestamps,
+    distances: recalcDist,
+    totalKm: cum,
+    durationSec: mergedTimestamps[mergedTimestamps.length - 1],
+  };
+}
+
+/**
  * Build the deck.gl data array for a set of replay tracks, applying the
  * chosen alignment mode.
  *

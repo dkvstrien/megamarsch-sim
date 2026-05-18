@@ -18,8 +18,8 @@ export const ALPHA = 0.3;
 /** Actual 2026 Munich route distance from GPS data (Igor: 109.7, Chid: 106.0, Dan: 102.1). */
 export const ROUTE_KM = 105;
 
-/** Official Megamarsch cutoff: noon Saturday → ~4pm Sunday = 28 hours. */
-export const CUTOFF_HOURS = 28;
+/** Soft cutoff for sim: 36 hours ensures even slow finishers complete. */
+export const CUTOFF_HOURS = 36;
 
 /** Official minimum average speed (handbook). Schlussläufer maintains this. */
 export const SCHLUSSLAEUFER_PACE = 4.2;
