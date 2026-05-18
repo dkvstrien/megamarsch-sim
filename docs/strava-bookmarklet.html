@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Strava → GPX Bookmarklet</title>
+<style>
+  body {
+    font-family: -apple-system, system-ui, sans-serif;
+    max-width: 600px; margin: 40px auto; padding: 0 20px;
+    background: #0d1117; color: #e6edf3;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
+  .bm-wrap { text-align: center; margin: 24px 0; }
+  .bookmarklet {
+    display: inline-block; padding: 16px 36px;
+    background: #fc4c02; color: white; font-size: 20px;
+    font-weight: 700; border-radius: 10px; text-decoration: none;
+    cursor: grab; user-select: none;
+  }
+  .bookmarklet:hover { background: #e34402; }
+  .instructions { margin: 24px 0; line-height: 1.7; color: #b0b8c0; }
+  .instructions strong { color: #e6edf3; }
+  .instructions ol { padding-left: 18px; }
+  .instructions li { margin: 8px 0; }
+  .note { font-size: 11px; color: #6e7681; margin-top: 32px; }
+  .note a { color: #58a6ff; }
+  code { background: #21262d; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>📡 Strava → GPX</h1>
+<p class="sub">One-click export with full timestamps. No account access needed.</p>
+
+<div class="bm-wrap">
+<p class="instructions"><strong>Drag this button</strong> to your bookmarks bar:</p>
+<p><a class="bookmarklet" href="javascript:(function(){var s=document.createElement('script');s.src='https://danielvanstrien.github.io/megamarsch-sim/strava-export.js';document.head.appendChild(s);})();">Strava → GPX</a></p>
+</div>
+
+<div class="instructions">
+  <strong>To use:</strong>
+  <ol>
+    <li>Open any of <strong>your</strong> Strava activities (must be logged in)</li>
+    <li>Click the <strong>Strava → GPX</strong> bookmark</li>
+    <li>GPX file downloads with full position &amp; time data</li>
+  </ol>
+</div>
+
+<p class="instructions">
+  Then upload the <code>.gpx</code> file to the Megamarsch Sim and replay it alongside
+  the simulated field.
+</p>
+
+<p class="note">
+  Works by calling Strava's own API from within your authenticated page session.
+  No data sent anywhere. No third-party access.
+  <br><br>
+  If it stops working, <a href="https://github.com/danielvanstrien/megamarsch-sim">check for updates</a>.
+</p>
+</body>
+</html>
