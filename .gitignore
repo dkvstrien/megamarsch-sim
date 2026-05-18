@@ -15,4 +15,5 @@ src/**/*.d.ts
 
 megamarch data/
 *.gpx
+!docs/route.gpx
 strava-export.py
