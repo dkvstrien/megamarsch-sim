@@ -1,66 +1,41 @@
-# megamarsch-sim
+# Megamarsch Sim
 
-Browser-based simulator for the Megamarsch München 100 km hike. Sign up, name a walker, pick a fitness band, watch your walker move along the Munich → Mittenwald route over 24 hours.
+Browser-based simulator for the [Megamarsch München](https://www.megamarsch.de/) 100 km hike. Watch 200 simulated walkers (or up to 1200) progress along the real Munich → Mittenwald route over 28 hours, alongside actual GPS recordings from participants.
 
-## What This Is
+**[→ Open the sim](https://danielvanstrien.github.io/megamarsch-sim)**
 
-- ~150 walkers per cohort move along the real route over 24 hours
-- Pace decay model calibrated against 4 real Munich finishers (`α = 0.30`)
-- Five fitness bands (Comfortable / Steady / Strong / Fast / Elite)
-- Historical 37% finish rate honored — walkers can DNF
-- Sandbox mode (start any time) + race-day mode (aligned with real event windows)
+## Features
 
-## Getting Started
+- **200 simulated walkers** across 6 fitness bands (Beginner → Elite), with wave starts, checkpoint rest stops, fatigue, weather effects, and DNFs
+- **Replay real GPX tracks** from GPS watches alongside the simulation
+- **Time-aligned mode** — see how friends' actual start times compare
+- **Schlussläufer & Vorläufer** — official pace-setters sweeping the course
+- **Histogram** showing walker density along the route
+- **Strava bookmarklet** — one-click GPX export with full timestamps
+
+## Quick start
 
 ```bash
 npm install
-npm run dev
+npm run dev        # http://localhost:5173
 ```
 
-Open http://localhost:5173.
+## Importing Strava data
 
-## Commands
+Open [`/strava-bookmarklet.html`](https://danielvanstrien.github.io/megamarsch-sim/strava-bookmarklet.html), drag the button to your bookmarks bar, then click it while viewing a Strava activity to download a GPX with full timestamps.
 
-- Install: `npm install`
-- Run dev: `npm run dev`
-- Build: `npm run build`
-- Preview build: `npm run preview`
-- Deploy: `npm run deploy` (Cloudflare Pages, see below)
+## Route
 
-## Deploy (Cloudflare Pages)
-
-First time only:
-
-```bash
-npx wrangler login          # opens a browser window — sign in to Cloudflare
-```
-
-Each deploy after that:
-
-```bash
-npm run deploy
-```
-
-That runs `vite build`, then pushes `dist/` to a Cloudflare Pages project named `megamarsch-sim`. Wrangler creates the project on first deploy. After it finishes you'll get a URL like `https://megamarsch-sim.pages.dev` plus a unique-per-deploy preview URL.
-
-Custom domain: set it up in the Cloudflare dashboard once the project exists (Pages → megamarsch-sim → Custom domains).
+The official 2026 Megamarsch München route (Munich → Mittenwald, ~105 km), sourced from the [megamarsch-companion](https://gitlab.com/travistang1/megamarsch-companion) project.
 
 ## Architecture
 
-Frontend-only for v0. The full vision adds a Cloudflare Workers + D1 backend for sign-up persistence, but the model and rendering work standalone.
+- **MapLibre GL** base map
+- **deck.gl** TripsLayer + ScatterplotLayer for animated walkers
+- **Deterministic model** — walker positions are pure functions of (pace_0, α, start_time, dnf_km)
+- **Ornstein-Uhlenbeck pace noise** for realistic speed variation
+- **Vanilla TypeScript** — no React needed
 
-Key files:
+## License
 
-- `src/model.ts` — pace decay equation, fitness bands, finish-time computation
-- `src/route.ts` — loads route GPX into a cumulative-km polyline
-- `src/walkers.ts` — generates a cohort with realistic band distribution
-- `src/main.ts` — wires MapLibre + deck.gl TripsLayer + time controls
-- `public/route.gpx` — official 2026 Megamarsch München route (from the companion repo)
-
-## External Dependencies
-
-- [MapLibre GL JS](https://maplibre.org/) — vector map base
-- [deck.gl](https://deck.gl) — animated walker layer (`TripsLayer`)
-- [@tmcw/togeojson](https://github.com/tmcw/togeojson) — GPX → GeoJSON parser
-
-No backend, no API keys, no accounts. v0 runs entirely client-side.
+MIT

@@ -12,3 +12,6 @@ src/**/*.js
 src/**/*.js.map
 src/**/*.d.ts
 
+megamarch data/
+*.gpx
+strava-export.py

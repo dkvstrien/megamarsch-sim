@@ -16,6 +16,8 @@ export interface RoutePoint {
   lon: number;
   lat: number;
   cumKm: number;
+  ele: number;   // elevation in meters (0 if unavailable)
+  slope: number;  // gradient as fraction (positive = uphill)
 }
 
 export interface RouteWaypoint {
@@ -48,17 +50,30 @@ function haversineKm(a: [number, number], b: [number, number]): number {
 /** Build a Route from a sparse polyline by computing cumulative distance. */
 function densify(
   coords: Array<[number, number]>,
+  elevations: number[],
   rawWaypoints: Array<{ name: string; lon: number; lat: number }> = [],
 ): Route {
   const points: RoutePoint[] = [];
   let cumKm = 0;
   for (let i = 0; i < coords.length; i++) {
     if (i > 0) cumKm += haversineKm(coords[i - 1], coords[i]);
-    points.push({ lon: coords[i][0], lat: coords[i][1], cumKm });
+    const ele = elevations[i] ?? 0;
+    points.push({ lon: coords[i][0], lat: coords[i][1], cumKm, ele, slope: 0 });
   }
   // Re-scale to exactly 100 km so the model and the polyline agree.
   const scale = 100 / cumKm;
   for (const p of points) p.cumKm *= scale;
+
+  // Compute slope (gradient) between consecutive points.
+  for (let i = 1; i < points.length; i++) {
+    const dKm = haversineKm(
+      [points[i - 1].lon, points[i - 1].lat],
+      [points[i].lon, points[i].lat],
+    );
+    if (dKm > 0.001) {
+      points[i].slope = (points[i].ele - points[i - 1].ele) / (dKm * 1000);
+    }
+  }
 
   // Project each waypoint onto the route by finding the nearest polyline vertex.
   // Good enough for VPS markers; haversine to every point is cheap at 2.5k pts.
@@ -111,7 +126,7 @@ export function syntheticRoute(): Route {
     }
   }
   samples.push(waypoints[waypoints.length - 1]);
-  return densify(samples, []);
+  return densify(samples, new Array(samples.length).fill(0), []);
 }
 
 /** Load /route.gpx if present; fall back to synthetic. */
@@ -135,6 +150,16 @@ export async function loadRoute(): Promise<Route> {
         ? geom.coordinates.map(([lon, lat]) => [lon, lat] as [number, number])
         : geom.coordinates.flat().map(([lon, lat]) => [lon, lat] as [number, number]);
 
+    // Extract elevation from trkpt <ele> tags.
+    const trkptEls = xml.getElementsByTagName("trkpt");
+    const elevations: number[] = [];
+    for (let i = 0; i < trkptEls.length; i++) {
+      const eleEl = trkptEls[i].getElementsByTagName("ele")[0];
+      elevations.push(eleEl ? parseFloat(eleEl.textContent ?? "0") : 0);
+    }
+    // Pad elevations to match coords length.
+    while (elevations.length < coords.length) elevations.push(elevations[elevations.length - 1] ?? 0);
+
     // Pull out waypoints (VPS markers) — Point features in the GeoJSON.
     const waypoints: Array<{ name: string; lon: number; lat: number }> = [];
     for (const f of geo.features) {
@@ -145,28 +170,29 @@ export async function loadRoute(): Promise<Route> {
       waypoints.push({ name, lon: coord[0], lat: coord[1] });
     }
 
-    return densify(coords, waypoints);
+    return densify(coords, elevations, waypoints);
   } catch {
     return syntheticRoute();
   }
 }
 
-/** Linear-interpolate a position along the route at a given km. */
+/** Binary-search + linear-interpolate a position along the route at a given km. */
 export function positionAtKm(route: Route, km: number): [number, number] {
   if (km <= 0) return [route.points[0].lon, route.points[0].lat];
   if (km >= route.totalKm) {
     const last = route.points[route.points.length - 1];
     return [last.lon, last.lat];
   }
-  // Binary search would be tidier; linear scan is fine for ~200 points.
-  for (let i = 1; i < route.points.length; i++) {
-    const p0 = route.points[i - 1];
-    const p1 = route.points[i];
-    if (km <= p1.cumKm) {
-      const t = (km - p0.cumKm) / (p1.cumKm - p0.cumKm);
-      return [p0.lon + (p1.lon - p0.lon) * t, p0.lat + (p1.lat - p0.lat) * t];
-    }
+  // Binary search for the segment containing km.
+  let lo = 0;
+  let hi = route.points.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (route.points[mid].cumKm < km) lo = mid + 1;
+    else hi = mid;
   }
-  const last = route.points[route.points.length - 1];
-  return [last.lon, last.lat];
+  const p0 = route.points[lo - 1];
+  const p1 = route.points[lo];
+  const t = (km - p0.cumKm) / (p1.cumKm - p0.cumKm);
+  return [p0.lon + (p1.lon - p0.lon) * t, p0.lat + (p1.lat - p0.lat) * t];
 }
