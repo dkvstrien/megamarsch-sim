@@ -1,7 +1,7 @@
 // Entry point. Wires:
 //   - MapLibre base map
-//   - deck.gl Mapbox overlay with PathLayer (route) + TripsLayer (walkers)
-//   - Top-left stats panel (with replay track sidebar)
+//   - deck.gl Mapbox overlay with PathLayer (route) + TripsLayer + ScatterplotLayer
+//   - Unified Participants panel (GPX uploads + generated walkers)
 //   - Bottom playhead (play/pause + speed slider + time display)
 
 import maplibregl from "maplibre-gl";
@@ -32,39 +32,37 @@ import {
 import type { ReplayTrack, ReplayMode, ReplayTripData } from "./replay";
 import { EVENT_START_EPOCH } from "./replay";
 
-const STORAGE_KEY = "megamarsch-sim:my-walkers:v2";
+const STORAGE_KEY = "megamarsch-sim:participants:v1";
+const NEXT_COLOR_KEY = "megamarsch-sim:next-color";
 
-interface SavedWalker {
+interface SavedParticipant {
+  kind: "generated" | "gpx";
   id: string;
   name: string;
-  bandId: number;
+  // generated
+  bandId?: number;
+  // gpx
+  fileName?: string;
+  colorIndex?: number;
+  customColor?: [number, number, number] | null;
 }
+
+// ---- Participant types ------------------------------------------------------
+
+type Participant =
+  | { kind: "generated"; id: string; name: string; walker: Walker; trip: Trip; colorIdx: number }
+  | { kind: "gpx"; id: string; name: string; track: ReplayTrack };
 
 // ---- Bootstrap ---------------------------------------------------------------
 
 async function main() {
   const route = await loadRoute();
 
-  // Filler cohort — disabled for now (real data replay is the focus).
-  // Restore with:
-  //   const cohort = generateCohort({ size: 150, realWalkers: [], startWindowMin: 120, seed: 42 });
-  //   const trips = buildAllTrips(cohort, route);
-
-  const userWalkers: Walker[] = [];
-  const userTrips: Trip[] = [];
-
-  // Per-user-walker color assignment (used by layers and by renderUserWalkers).
-  const userWalkerColorIdx = new Map<string, number>();
-  let nextUwColor = 0;
-
-  // ---- Replay state --------------------------------------------------------
-
-  const replayTracks = new Map<string, ReplayTrack>();
-  let replayMode: ReplayMode = "side-by-side";
+  // ---- Participants --------------------------------------------------------
   let nextColorIndex = 0;
+  const participantMap = new Map<string, Participant>();
 
   // ---- Schlussläufer & Vorläufer -------------------------------------------
-  // Official pace-makers from the handbook. Always present.
   const schlusslaeufer: Walker = {
     id: "schlusslaeufer",
     name: "Schlussläufer",
@@ -93,14 +91,12 @@ async function main() {
   const cohortCount = byId<HTMLSelectElement>("cohort-count");
   const histSvg = byId<SVGSVGElement>("histogram-svg");
 
-  // VPS3 km position for bus effect (find the indoor checkpoint).
   const vps3Km =
     route.waypoints.length >= 3
       ? [...route.waypoints].sort((a, b) => a.cumKm - b.cumKm)[2]?.cumKm ?? 70
       : 70;
 
-  // Track walkers currently riding the VPS3 bus.
-  const busRiders = new Map<string, number>(); // walker id → simSec when they board
+  const busRiders = new Map<string, number>();
 
   function enableCohort() {
     const size = parseInt(cohortCount.value, 10) || 200;
@@ -147,8 +143,6 @@ async function main() {
   cohortCount.addEventListener("change", () => {
     if (cohortToggle.checked) enableCohort();
   });
-
-  // Default: cohort ON, 200 walkers.
   cohortToggle.checked = true;
   cohortCount.value = "200";
   enableCohort();
@@ -167,7 +161,6 @@ async function main() {
 
   await new Promise<void>((resolve) => map.on("load", () => resolve()));
 
-  // deck.gl overlay rendered into a transparent canvas above the map.
   const deck = new Deck({
     canvas: createDeckCanvas(map),
     initialViewState: {
@@ -180,19 +173,17 @@ async function main() {
     controller: false,
   });
 
-  // Sync MapLibre <-> deck.gl camera.
   syncCameras(map, deck);
 
   // Time loop ----------------------------------------------------------------
 
   const state = {
-    simSec: 0, // seconds since cohort start
-    speed: 60, // multiplier (1 = real time, 60 = 1 wall-second is 1 sim minute)
+    simSec: 0,
+    speed: 60,
     paused: false,
     lastFrameMs: performance.now(),
   };
 
-  // Hook up controls.
   const playBtn = byId<HTMLButtonElement>("play-pause");
   const restartBtn = byId<HTMLButtonElement>("restart-btn");
   const speedSlider = byId<HTMLInputElement>("speed");
@@ -216,39 +207,55 @@ async function main() {
     state.speed = parseInt(speedSlider.value, 10);
     speedDisplay.textContent = `${state.speed}×`;
   });
-
-  // Scrubber: seek to any point in the timeline.
   timeline.addEventListener("input", () => {
     isScrubbing = true;
     state.simSec = parseInt(timeline.value, 10);
     scrubLabel.textContent = formatHM(state.simSec);
   });
-  timeline.addEventListener("change", () => {
-    // Mouse released — stop overriding from tick.
-    isScrubbing = false;
-  });
-  // Pointer/touch end to catch drag release outside the element.
+  timeline.addEventListener("change", () => { isScrubbing = false; });
   timeline.addEventListener("pointerup", () => { isScrubbing = false; });
   timeline.addEventListener("touchend", () => { isScrubbing = false; });
 
-  // Stats panel
+  // Stats panel --------------------------------------------------------------
   const statWalkers = byId<HTMLElement>("stat-walkers");
   const statActive = byId<HTMLElement>("stat-active");
   const statFinished = byId<HTMLElement>("stat-finished");
   const statDnf = byId<HTMLElement>("stat-dnf");
   const statTime = byId<HTMLElement>("stat-time");
   const statClock = byId<HTMLElement>("stat-clock");
-  const userWalkerList = byId<HTMLElement>("user-walker-list");
 
-  // Replay UI elements
+  // Replay UI ----------------------------------------------------------------
   const replayInput = byId<HTMLInputElement>("replay-file-input");
-  const replayList = byId<HTMLElement>("replay-list");
-  const replayEmpty = byId<HTMLElement>("replay-empty");
   const modeSideBySide = byId<HTMLInputElement>("replay-mode-sbs");
   const modeTimeAligned = byId<HTMLInputElement>("replay-mode-aligned");
-  const replayUploadBtn = byId<HTMLButtonElement>("replay-upload-btn");
 
-  replayUploadBtn.addEventListener("click", () => replayInput.click());
+  let replayMode: ReplayMode = "side-by-side";
+  modeSideBySide.addEventListener("change", () => {
+    if (modeSideBySide.checked) replayMode = "side-by-side";
+  });
+  modeTimeAligned.addEventListener("change", () => {
+    if (modeTimeAligned.checked) replayMode = "time-aligned";
+  });
+
+  // ---- Add participant modal ----------------------------------------------
+  const addModal = byId<HTMLElement>("add-modal");
+  const addUploadBtn = byId<HTMLButtonElement>("add-upload-btn");
+  const addGenerateBtn = byId<HTMLButtonElement>("add-generate-btn");
+  const addCloseBtn = byId<HTMLButtonElement>("add-close-btn");
+  const addBtn = byId<HTMLButtonElement>("add-participant-btn");
+  const participantList = byId<HTMLElement>("participant-list");
+
+  addBtn.addEventListener("click", () => { addModal.hidden = false; });
+  addCloseBtn.addEventListener("click", () => { addModal.hidden = true; });
+  addUploadBtn.addEventListener("click", () => {
+    addModal.hidden = true;
+    replayInput.click();
+  });
+  addGenerateBtn.addEventListener("click", () => {
+    addModal.hidden = true;
+    editingWalkerId = null;
+    showSignup(null);
+  });
 
   // ---- File upload ---------------------------------------------------------
 
@@ -259,7 +266,6 @@ async function main() {
     let added = 0;
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      // Accept .gpx, .gpx.txt (Strava), .xml — let the parser decide.
       const lc2 = file.name.toLowerCase();
       if (!lc2.endsWith(".gpx") && !lc2.endsWith(".gpx.txt") && !lc2.endsWith(".xml")) {
         if (lc2.endsWith(".png") || lc2.endsWith(".jpg") || lc2.endsWith(".jpeg") ||
@@ -268,13 +274,16 @@ async function main() {
 
       try {
         let track = await parseGpxFile(file, nextColorIndex);
-        // Fill missing route prefix (late recording start, etc.).
         track = fillMissingRoutePrefix(
           track,
           route.points,
           (km) => positionAtKm(route, km),
         );
-        replayTracks.set(track.id, track);
+        // Default name from GPX metadata or filename.
+        const name = track.name.trim() || file.name.replace(/\.(gpx|gpx\.txt|xml)$/i, "");
+        const id = `gpx-${Date.now()}-${i}`;
+        const p: Participant = { kind: "gpx", id, name, track };
+        participantMap.set(id, p);
         nextColorIndex++;
         added++;
       } catch (err) {
@@ -282,257 +291,256 @@ async function main() {
         const errorDiv = byId<HTMLElement>("replay-error");
         errorDiv.textContent = `${file.name}: ${msg}`;
         errorDiv.hidden = false;
-        setTimeout(() => {
-          errorDiv.hidden = true;
-          errorDiv.textContent = "";
-        }, 5000);
+        setTimeout(() => { errorDiv.hidden = true; errorDiv.textContent = ""; }, 5000);
       }
     }
 
-    // Reset file input so the same file can be re-selected.
     replayInput.value = "";
-
     if (added > 0) {
-      renderTrackList();
+      persistParticipants();
+      renderParticipants();
     }
   });
 
-  modeSideBySide.addEventListener("change", () => {
-    if (modeSideBySide.checked) replayMode = "side-by-side";
-  });
-  modeTimeAligned.addEventListener("change", () => {
-    if (modeTimeAligned.checked) replayMode = "time-aligned";
-  });
+  // ---- GPX rename handler -------------------------------------------------
 
-  // ---- Replay track list rendering -----------------------------------------
-
-  function renderTrackList() {
-    replayList.innerHTML = "";
-    // Sort by current progress (km) descending — leader first.
-    const entries = Array.from(replayTracks.values()).sort((a, b) => {
-      let oa = 0, ob = 0;
-      if (replayMode === "time-aligned") {
-        oa = (a.startEpochMs - EVENT_START_EPOCH) / 1000;
-        ob = (b.startEpochMs - EVENT_START_EPOCH) / 1000;
+  function gpxRename(id: string) {
+    const p = participantMap.get(id);
+    if (!p || p.kind !== "gpx") return;
+    const oldName = p.name;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = oldName;
+    input.className = "replay-name-edit";
+    input.maxLength = 40;
+    const commit = () => {
+      const newName = input.value.trim();
+      if (newName && newName !== oldName) {
+        p.name = newName;
+        persistParticipants();
       }
-      const ka = kmAtSimSec(a, state.simSec, oa);
-      const kb = kmAtSimSec(b, state.simSec, ob);
-      return kb - ka;
+      renderParticipants();
+    };
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") commit();
+      if (e.key === "Escape") { input.value = oldName; commit(); }
     });
-    replayEmpty.hidden = entries.length > 0;
+    const nameEl = document.querySelector(`[data-pname="${id}"]`);
+    if (nameEl) nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+  }
 
-    if (entries.length === 0) {
-      replayInput.value = "";
+  function gpxRemove(id: string) {
+    participantMap.delete(id);
+    persistParticipants();
+    renderParticipants();
+  }
+
+  function gpxCycleColor(id: string) {
+    const p = participantMap.get(id);
+    if (!p || p.kind !== "gpx") return;
+    p.track.colorIndex++;
+    p.track.customColor = null;
+    persistParticipants();
+    renderParticipants();
+  }
+
+  // ---- Participants list rendering ----------------------------------------
+
+  function renderParticipants() {
+    participantList.innerHTML = "";
+
+    if (participantMap.size === 0) {
+      participantList.innerHTML =
+        '<div class="uw-empty">No participants yet. Click + to add one.</div>';
       return;
     }
 
-    for (const track of entries) {
-      const color = track.customColor ?? replayColor(track.colorIndex);
-      const colorStr = `rgb(${color[0]},${color[1]},${color[2]})`;
+    // Sort by current progress (km) descending — leader first.
+    const sorted = Array.from(participantMap.values()).sort((a, b) => {
+      const aKm = participantKm(a);
+      const bKm = participantKm(b);
+      return bKm - aKm;
+    });
 
+    for (const p of sorted) {
+      const color = participantColor(p);
+      const colorStr = `rgb(${color[0]},${color[1]},${color[2]})`;
       const row = document.createElement("div");
       row.className = "replay-row";
-      row.dataset.trackId = track.id;
+      row.dataset.pid = p.id;
 
-      row.innerHTML = `
-        <span class="replay-swatch" style="background:${colorStr}" data-swatch="${track.id}" title="Click to cycle color"></span>
-        <span class="replay-name" data-name="${track.id}" title="Click to rename">${escapeHtml(track.name)}</span>
-        <span class="replay-km" data-track-km="${track.id}">0.0 km</span>
-        <span class="replay-bar-wrap">
-          <span class="replay-bar" style="width:0%;background:${colorStr};" data-track-bar="${track.id}"></span>
-        </span>
-        <button class="replay-remove" data-remove="${track.id}" title="Remove track">×</button>
-      `;
+      if (p.kind === "gpx") {
+        row.innerHTML = `
+          <span class="replay-swatch" style="background:${colorStr}" data-pswatch="${p.id}" title="Click to cycle color"></span>
+          <span class="replay-name" data-pname="${p.id}" title="Click to rename">${escapeHtml(p.name)}</span>
+          <span class="replay-km" data-pkm="${p.id}">0.0 km</span>
+          <span class="replay-bar-wrap">
+            <span class="replay-bar" style="width:0%;background:${colorStr};" data-pbar="${p.id}"></span>
+          </span>
+          <button class="replay-remove" data-premove="${p.id}" title="Remove">×</button>
+        `;
+      } else {
+        const b = bandById(p.walker.bandId);
+        row.innerHTML = `
+          <span class="uw-dot" style="background:${colorStr}"></span>
+          <span class="uw-name">${escapeHtml(p.name)}</span>
+          <span class="uw-band">${b.label}</span>
+          <span class="uw-km" data-pkm="${p.id}">0 km</span>
+          <span class="uw-status" data-pstatus="${p.id}">—</span>
+          <button class="uw-edit" data-pedit="${p.id}" title="Edit">✎</button>
+          <button class="uw-remove" data-premove="${p.id}" title="Remove">×</button>
+        `;
+      }
 
-      replayList.appendChild(row);
+      participantList.appendChild(row);
     }
 
-    // Wire up color swatch clicks — cycle through palette.
-    replayList.querySelectorAll<HTMLElement>(".replay-swatch").forEach((el) => {
-      el.addEventListener("click", () => {
-        const id = el.dataset.swatch;
-        if (!id) return;
-        const track = replayTracks.get(id);
-        if (!track) return;
-        // Cycle colorIndex and clear customColor (auto palette mode).
-        track.colorIndex++;
-        track.customColor = null;
-        renderTrackList();
-      });
+    // Wire up GPX interactions.
+    participantList.querySelectorAll<HTMLElement>(".replay-swatch").forEach((el) => {
+      el.addEventListener("click", () => gpxCycleColor(el.dataset.pswatch!));
+    });
+    participantList.querySelectorAll<HTMLElement>(".replay-name").forEach((el) => {
+      el.addEventListener("click", () => gpxRename(el.dataset.pname!));
+    });
+    participantList.querySelectorAll<HTMLButtonElement>(".replay-remove").forEach((btn) => {
+      btn.addEventListener("click", () => gpxRemove(btn.dataset.premove!));
     });
 
-    // Wire up name clicks — inline rename.
-    replayList.querySelectorAll<HTMLElement>(".replay-name").forEach((el) => {
-      el.addEventListener("click", () => {
-        const id = el.dataset.name;
-        if (!id) return;
-        const track = replayTracks.get(id);
-        if (!track) return;
-        const oldName = track.name;
-        // Replace with an input field.
-        const input = document.createElement("input");
-        input.type = "text";
-        input.value = oldName;
-        input.className = "replay-name-edit";
-        input.maxLength = 40;
-        const commit = () => {
-          const newName = input.value.trim();
-          if (newName && newName !== oldName) {
-            track.name = newName;
-          }
-          renderTrackList();
-        };
-        input.addEventListener("blur", commit);
-        input.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") commit();
-          if (e.key === "Escape") {
-            input.value = oldName;
-            commit();
-          }
-        });
-        el.replaceWith(input);
-        input.focus();
-        input.select();
-      });
-    });
-
-    // Wire up remove buttons.
-    replayList.querySelectorAll<HTMLButtonElement>(".replay-remove").forEach((btn) => {
+    // Wire up generated walker interactions.
+    participantList.querySelectorAll<HTMLButtonElement>(".uw-edit").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const id = btn.dataset.remove;
-        if (id) {
-          replayTracks.delete(id);
-          renderTrackList();
+        const id = btn.dataset.pedit!;
+        const p = participantMap.get(id);
+        if (p && p.kind === "generated") {
+          editingWalkerId = id;
+          showSignup({ id: p.id, name: p.name, bandId: p.walker.bandId });
         }
       });
     });
+    participantList.querySelectorAll<HTMLButtonElement>(".uw-remove").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        participantMap.delete(btn.dataset.premove!);
+        persistParticipants();
+        renderParticipants();
+      });
+    });
   }
 
-  // ---- User walker management (add / edit / remove) -----------------------
+  // ---- Helper: participant km/color ----------------------------------------
 
-  // Load saved walkers from localStorage.
-  const savedWalkers = loadSavedWalkers();
-  for (const sw of savedWalkers) {
-    const w = createUserWalker(sw.id, sw.name, sw.bandId, 0);
-    userWalkers.push(w);
-    userTrips.push(buildTrip(w, route));
-    userWalkerColorIdx.set(sw.id, nextUwColor);
-    nextUwColor++;
+  function participantKm(p: Participant): number {
+    if (p.kind === "gpx") {
+      let os = 0;
+      if (replayMode === "time-aligned") {
+        os = (p.track.startEpochMs - EVENT_START_EPOCH) / 1000;
+      }
+      return kmAtSimSec(p.track, state.simSec, os) ?? 0;
+    } else {
+      const s = snapshotAt(p.walker, route, state.simSec / 3600);
+      return s.km;
+    }
   }
+
+  function participantColor(p: Participant): [number, number, number] {
+    if (p.kind === "gpx") {
+      if (p.track.customColor) return p.track.customColor;
+      return replayColor(p.track.colorIndex);
+    } else {
+      if (!(p.colorIdx in USER_WALKER_COLORS)) return [255, 255, 255, 255] as any;
+      return USER_WALKER_COLORS[p.colorIdx % USER_WALKER_COLORS.length];
+    }
+  }
+
+  // ---- Generated walker management -----------------------------------------
 
   let editingWalkerId: string | null = null;
 
-  function renderUserWalkers() {
-    userWalkerList.innerHTML = "";
+  function addGeneratedWalker(name: string, bandId: number) {
+    const id = `uw-${Date.now()}`;
+    void (bandById(bandId)); // validate band exists
+    const w = createUserWalker(id, name, bandId, state.simSec);
+    const trip = buildTrip(w, route);
+    const ci = nextColorIndex++;
+    const p: Participant = { kind: "generated", id, name, walker: w, trip, colorIdx: ci };
+    participantMap.set(id, p);
+    persistParticipants();
+    renderParticipants();
+  }
 
-    if (userWalkers.length === 0) {
-      userWalkerList.innerHTML =
-        '<div class="uw-empty">No walkers yet. Click + to add one.</div>';
-      return;
-    }
-
-    for (const w of userWalkers) {
-      const band = bandById(w.bandId);
-      const ci = userWalkerColorIdx.get(w.id);
-      const c = ci !== undefined
-        ? USER_WALKER_COLORS[ci % USER_WALKER_COLORS.length]
-        : BAND_COLORS[w.bandId] ?? [150, 150, 150];
-      const colorDot = `rgb(${c[0]},${c[1]},${c[2]})`;
-
-      const row = document.createElement("div");
-      row.className = "uw-row";
-      row.dataset.walkerId = w.id;
-      row.innerHTML = `
-        <span class="uw-dot" style="background:${colorDot}"></span>
-        <span class="uw-name">${escapeHtml(w.name)}</span>
-        <span class="uw-band">${band.label}</span>
-        <span class="uw-km" id="uw-km-${w.id}">0 km</span>
-        <span class="uw-status" id="uw-status-${w.id}">—</span>
-        <button class="uw-edit" data-edit="${w.id}" title="Edit">✎</button>
-        <button class="uw-remove" data-remove="${w.id}" title="Remove">×</button>
-      `;
-      userWalkerList.appendChild(row);
-    }
-
-    // Wire up edit buttons.
-    userWalkerList.querySelectorAll<HTMLButtonElement>(".uw-edit").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const id = btn.dataset.edit;
-        if (!id) return;
-        const w = userWalkers.find((u) => u.id === id);
-        if (w) {
-          editingWalkerId = id;
-          showSignup({ id: w.id, name: w.name, bandId: w.bandId });
-        }
-      });
-    });
-
-    // Wire up remove buttons.
-    userWalkerList.querySelectorAll<HTMLButtonElement>(".uw-remove").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const id = btn.dataset.remove;
-        if (!id) return;
-        const idx = userWalkers.findIndex((u) => u.id === id);
-        if (idx !== -1) {
-          userWalkers.splice(idx, 1);
-          userTrips.splice(idx, 1);
-          persistUserWalkers();
-          renderUserWalkers();
-        }
-      });
-    });
+  function editGeneratedWalker(id: string, name: string, bandId: number) {
+    const p = participantMap.get(id);
+    if (!p || p.kind !== "generated") return;
+    const band = bandById(bandId);
+    p.walker = { ...p.walker, name, bandId, pace0: band.pace0 };
+    p.trip = buildTrip(p.walker, route);
+    p.name = name;
+    persistParticipants();
+    renderParticipants();
   }
 
   setupSignup({
     route,
     onSubmit: (name, bandId) => {
       if (editingWalkerId) {
-        // Edit existing walker.
-        const idx = userWalkers.findIndex((w) => w.id === editingWalkerId);
-        if (idx !== -1) {
-          const band = bandById(bandId);
-          userWalkers[idx] = {
-            ...userWalkers[idx],
-            name,
-            bandId,
-            pace0: band.pace0,
-          };
-          userTrips[idx] = buildTrip(userWalkers[idx], route);
-        }
+        editGeneratedWalker(editingWalkerId, name, bandId);
         editingWalkerId = null;
       } else {
-        // Add new walker.
-        const id = `uw-${Date.now()}`;
-        const w = createUserWalker(id, name, bandId, state.simSec);
-        userWalkers.push(w);
-        userTrips.push(buildTrip(w, route));
-        userWalkerColorIdx.set(id, nextUwColor);
-        nextUwColor++;
+        addGeneratedWalker(name, bandId);
       }
-      persistUserWalkers();
-      renderUserWalkers();
     },
   });
 
-  byId<HTMLButtonElement>("add-walker-btn").addEventListener("click", () => {
-    editingWalkerId = null;
-    showSignup(null);
-  });
+  // ---- Persistence ---------------------------------------------------------
 
-  function persistUserWalkers() {
-    const data: SavedWalker[] = userWalkers.map((w) => ({
-      id: w.id,
-      name: w.name,
-      bandId: w.bandId,
-    }));
+  function persistParticipants() {
+    const data: SavedParticipant[] = [];
+    for (const p of participantMap.values()) {
+      if (p.kind === "generated") {
+        data.push({ kind: "generated", id: p.id, name: p.name, bandId: p.walker.bandId });
+      } else {
+        data.push({
+          kind: "gpx",
+          id: p.id,
+          name: p.name,
+          colorIndex: p.track.colorIndex,
+          customColor: p.track.customColor,
+        });
+      }
+    }
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    } catch {
-      // ignore
-    }
+      localStorage.setItem(NEXT_COLOR_KEY, String(nextColorIndex));
+    } catch { /* ignore */ }
   }
 
-  renderUserWalkers();
+  // Load saved participants. GPX ones can't be restored from localStorage
+  // (the file data is ephemeral), but generated walkers can.
+  function loadSavedParticipants() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const arr: SavedParticipant[] = JSON.parse(raw);
+      for (const s of arr) {
+        if (s.kind === "generated" && s.bandId != null) {
+          const w = createUserWalker(s.id, s.name, s.bandId, 0);
+          const trip = buildTrip(w, route);
+          const ci = nextColorIndex++;
+          participantMap.set(s.id, { kind: "generated", id: s.id, name: s.name, walker: w, trip, colorIdx: ci });
+        }
+      }
+    } catch { /* fall through */ }
+
+    try {
+      const ciRaw = localStorage.getItem(NEXT_COLOR_KEY);
+      if (ciRaw) nextColorIndex = parseInt(ciRaw, 10) || nextColorIndex;
+    } catch { /* fall through */ }
+  }
+
+  loadSavedParticipants();
+  renderParticipants();
 
   // ---- Main tick loop ------------------------------------------------------
 
@@ -544,11 +552,10 @@ async function main() {
     if (!state.paused) {
       state.simSec += (dtMs / 1000) * state.speed;
 
-      // Loop back when all tracks are done.
-      const replayTrips = buildReplayTrips(
-        Array.from(replayTracks.values()),
-        replayMode,
-      );
+      const gpxTracks = Array.from(participantMap.values())
+        .filter((p): p is Participant & { kind: "gpx" } => p.kind === "gpx")
+        .map((p) => p.track);
+      const replayTrips = buildReplayTrips(gpxTracks, replayMode);
       const maxTime = Math.max(
         maxTripTime(replayTrips) + 3600,
         (CUTOFF_HOURS + 2) * 3600,
@@ -556,11 +563,13 @@ async function main() {
       if (state.simSec > maxTime) state.simSec = 0;
     }
 
-    // ---- Replay data for this frame ----------------------------------------
-    const allTracks = Array.from(replayTracks.values());
-    const replayTrips = buildReplayTrips(allTracks, replayMode);
+    // ---- Build replay data ------------------------------------------------
+    const gpxParticipants = Array.from(participantMap.values())
+      .filter((p): p is Participant & { kind: "gpx" } => p.kind === "gpx");
+    const gpxTracks = gpxParticipants.map((p) => p.track);
+    const replayTrips = buildReplayTrips(gpxTracks, replayMode);
 
-    // ---- Replay head positions (computed here, used in ScatterplotLayer) ---
+    // Replay head positions.
     const replayHeads: ReplayHead[] = [];
     for (const rt of replayTrips) {
       const track = rt.track;
@@ -568,15 +577,12 @@ async function main() {
       if (replayMode === "time-aligned") {
         offsetSec = (track.startEpochMs - EVENT_START_EPOCH) / 1000;
       }
-
       const t = state.simSec - offsetSec;
       const active = t >= 0 && t <= track.durationSec;
-
       let headPos: [number, number] = track.path[0];
       if (t >= track.durationSec) {
         headPos = track.path[track.path.length - 1];
       } else if (t > 0) {
-        // Interpolate position.
         for (let i = 1; i < track.timestamps.length; i++) {
           if (t <= track.timestamps[i]) {
             const frac =
@@ -592,7 +598,6 @@ async function main() {
           }
         }
       }
-
       replayHeads.push({
         position: headPos,
         color: rt.color,
@@ -602,29 +607,22 @@ async function main() {
       });
     }
 
-    // ---- Filler walker heads (fast path — no trails, dots only) -----------
+    // ---- Filler walker heads -----------------------------------------------
     const tH = state.simSec / 3600;
     const fillerHeads: FillerHead[] = [];
     const nowSimSec = state.simSec;
-
     for (const w of cohort) {
       const s = snapshotAt(w, route, tH);
       let pos: [number, number];
       let status: "walking" | "finished" | "dnf" | "pre-start" | "bus";
-
-      // VPS3 bus effect: walkers who DNF at VPS3 teleport to finish.
       if (s.status === "dnf" && s.km >= vps3Km - 1 && s.km <= vps3Km + 1) {
-        if (!busRiders.has(w.id)) {
-          busRiders.set(w.id, nowSimSec);
-        }
+        if (!busRiders.has(w.id)) busRiders.set(w.id, nowSimSec);
         const boardTime = busRiders.get(w.id)!;
-        const busDelay = 30; // 30 sim-seconds for the bus ride
+        const busDelay = 30;
         if (nowSimSec >= boardTime + busDelay) {
-          // Arrived at finish via bus.
           pos = positionAtKm(route, ROUTE_KM);
           status = "bus";
         } else {
-          // Still on the bus — freeze at VPS3.
           pos = s.position;
           status = "dnf";
         }
@@ -632,61 +630,78 @@ async function main() {
         pos = s.position;
         status = s.status;
       }
-
       const color = waveColor(w.startOffsetMin, 120, 8);
-      fillerHeads.push({
-        position: pos,
-        color,
-        bandId: w.bandId,
-        status,
-      });
+      fillerHeads.push({ position: pos, color, bandId: w.bandId, status });
     }
 
-    // ---- Update replay sidebar ---------------------------------------------
-    for (const track of allTracks) {
-      let offsetSec = 0;
-      if (replayMode === "time-aligned") {
-        offsetSec = (track.startEpochMs - EVENT_START_EPOCH) / 1000;
+    // ---- Update participant sidebar ----------------------------------------
+    // Re-sort DOM rows by current km (descending).
+    const sortedIds = Array.from(participantMap.entries())
+      .sort(([, a], [, b]) => participantKm(b) - participantKm(a))
+      .map(([id]) => id);
+
+    const rowsInDom = participantList.querySelectorAll<HTMLElement>("[data-pid]");
+    if (rowsInDom.length === sortedIds.length) {
+      for (const id of sortedIds) {
+        const row = participantList.querySelector<HTMLElement>(`[data-pid="${id}"]`);
+        if (row) participantList.appendChild(row);
+      }
+    }
+
+    for (const p of participantMap.values()) {
+      const km = participantKm(p);
+      const kmEl = document.querySelector<HTMLElement>(`[data-pkm="${p.id}"]`);
+      if (kmEl) kmEl.textContent = `${km.toFixed(1)} km`;
+
+      const barEl = document.querySelector<HTMLElement>(`[data-pbar="${p.id}"]`);
+      if (barEl && p.kind === "gpx") {
+        let os = 0;
+        if (replayMode === "time-aligned") os = (p.track.startEpochMs - EVENT_START_EPOCH) / 1000;
+        const t = state.simSec - os;
+        const pct = Math.min(100, Math.max(0, (t / p.track.durationSec) * 100));
+        barEl.style.width = `${pct}%`;
       }
 
-      const km = kmAtSimSec(track, state.simSec, offsetSec);
-      const t = state.simSec - offsetSec;
-      const pct = Math.min(100, Math.max(0, (t / track.durationSec) * 100));
-
-      const kmEl = document.querySelector<HTMLElement>(
-        `[data-track-km="${track.id}"]`,
-      );
-      const barEl = document.querySelector<HTMLElement>(
-        `[data-track-bar="${track.id}"]`,
-      );
-      if (kmEl) kmEl.textContent = `${km.toFixed(1)} km`;
-      if (barEl) barEl.style.width = `${pct}%`;
+      if (p.kind === "generated") {
+        const s = snapshotAt(p.walker, route, tH);
+        const statusEl = document.querySelector<HTMLElement>(`[data-pstatus="${p.id}"]`);
+        if (statusEl) {
+          const label = statusLabel(s.status);
+          const key = s.status === "pre-start" ? "walking" : s.status;
+          statusEl.textContent = label;
+          statusEl.className = `uw-status ${key}`;
+        }
+      }
     }
 
     // ---- Layers ------------------------------------------------------------
+    // Collect generated walker trips (plus Schluss/Vor) for trails.
+    const uwTrips: Trip[] = [schlussTrip, vorTrip];
+    const uwColorIdx = new Map<string, number>();
+    for (const p of participantMap.values()) {
+      if (p.kind === "generated") {
+        uwTrips.push(p.trip);
+        uwColorIdx.set(p.id, p.colorIdx);
+      }
+    }
 
-    // Build layers with user walkers + Schluss/Vor + replay data.
-    // Filler cohort is rendered separately (fast ScatterplotLayer).
-    const allTrips = [...userTrips, schlussTrip, vorTrip];
     deck.setProps({
       layers: makeLayers(
         route,
-        allTrips,
+        uwTrips,
         state.simSec,
         replayTrips,
         replayHeads,
-        userWalkerColorIdx,
+        uwColorIdx,
         fillerHeads,
       ),
     });
 
     // ---- Stats -------------------------------------------------------------
-
     statTime.textContent = formatHM(state.simSec);
     statClock.textContent = formatClock(EVENT_START_EPOCH, state.simSec);
     timeDisplay.textContent = formatHM(state.simSec);
 
-    // ---- Scrubber sync ---------------------------------------------------
     const scrubMax = Math.max(
       maxTripTime(replayTrips) + 3600,
       (CUTOFF_HOURS + 2) * 3600,
@@ -698,37 +713,34 @@ async function main() {
       scrubLabel.textContent = formatHM(state.simSec);
     }
 
-    if (replayTracks.size > 0 || cohort.length > 0) {
-      let active = 0;
-      let finished = 0;
-      let dnfCount = 0;
-      let totalCount = replayTracks.size + cohort.length;
+    if (participantMap.size > 0 || cohort.length > 0) {
+      let active = 0, finished = 0, dnfCount = 0;
+      let totalCount = cohort.length;
 
-      // Replay track stats
-      for (const track of allTracks) {
+      // GPX participants
+      for (const p of gpxParticipants) {
         let os = 0;
-        if (replayMode === "time-aligned") {
-          os = (track.startEpochMs - EVENT_START_EPOCH) / 1000;
-        }
+        if (replayMode === "time-aligned") os = (p.track.startEpochMs - EVENT_START_EPOCH) / 1000;
         const t = state.simSec - os;
         if (t < 0) continue;
-        if (t >= track.durationSec) finished++;
+        if (t >= p.track.durationSec) finished++;
         else active++;
+        totalCount++;
       }
 
       // Cohort stats
-      const tHours = state.simSec / 3600;
       for (const w of cohort) {
-        const s = snapshotAt(w, route, tHours);
+        const s = snapshotAt(w, route, tH);
         if (s.status === "walking") active++;
         else if (s.status === "finished") finished++;
         else if (s.status === "dnf") dnfCount++;
       }
 
-      // User walkers
-      totalCount += userWalkers.length;
-      for (const w of userWalkers) {
-        const s = snapshotAt(w, route, tHours);
+      // Generated participants
+      for (const p of participantMap.values()) {
+        if (p.kind !== "generated") continue;
+        totalCount++;
+        const s = snapshotAt(p.walker, route, tH);
         if (s.status === "pre-start") continue;
         if (s.status === "walking") active++;
         else if (s.status === "finished") finished++;
@@ -746,31 +758,22 @@ async function main() {
       statDnf.textContent = "0";
     }
 
-    // ---- User walker stats ------------------------------------------------
-    for (const w of userWalkers) {
-      const s = snapshotAt(w, route, state.simSec / 3600);
-      const kmEl = document.getElementById(`uw-km-${w.id}`);
-      const statusEl = document.getElementById(`uw-status-${w.id}`);
-      if (kmEl) kmEl.textContent = `${s.km.toFixed(1)} km`;
-      if (statusEl) {
-        const label = statusLabel(s.status);
-        const key = s.status === "pre-start" ? "walking" : s.status;
-        statusEl.textContent = label;
-        statusEl.className = `uw-status ${key}`;
-      }
-    }
-
     // ---- Histogram ---------------------------------------------------------
-    if (cohort.length > 0 || userWalkers.length > 0 || allTracks.length > 0) {
+    const allGpxTracks = gpxTracks;
+    const generatedWalkers = Array.from(participantMap.values())
+      .filter((p): p is Participant & { kind: "generated" } => p.kind === "generated")
+      .map((p) => p.walker);
+
+    if (cohort.length > 0 || generatedWalkers.length > 0 || allGpxTracks.length > 0) {
       updateHistogram(
         histSvg,
         route,
         cohort,
-        userWalkers,
+        generatedWalkers,
         schlusslaeufer,
         vorlaeufer,
-        state.simSec / 3600,
-        allTracks,
+        tH,
+        allGpxTracks,
         replayMode,
         replayTrips,
       );
@@ -781,7 +784,7 @@ async function main() {
   requestAnimationFrame(tick);
 }
 
-// ---- Replay head type -------------------------------------------------------
+// ---- Types -------------------------------------------------------------------
 
 interface ReplayHead {
   position: [number, number];
@@ -798,52 +801,47 @@ interface FillerHead {
   status: "walking" | "finished" | "dnf" | "pre-start" | "bus";
 }
 
-// ---- Layer construction ------------------------------------------------------
+// ---- Colors ------------------------------------------------------------------
 
 const BAND_COLORS: Record<number, [number, number, number]> = {
-  0: [156, 156, 156], // Beginner — muted gray
-  1: [188, 140, 90],  // Comfortable — earth
-  2: [102, 153, 204], // Steady — muted blue
-  3: [124, 196, 121], // Strong — green
-  4: [232, 165, 81],  // Fast — orange
-  5: [220, 86, 86],   // Elite — red
+  0: [156, 156, 156],
+  1: [188, 140, 90],
+  2: [102, 153, 204],
+  3: [124, 196, 121],
+  4: [232, 165, 81],
+  5: [220, 86, 86],
 };
 
-/** Map a walker's start offset to a wave-based color gradient.
- *  Early waves (warm) → late waves (cool). */
 function waveColor(
   startOffsetMin: number,
   startWindowMin: number,
   waveCount: number,
 ): [number, number, number] {
-  const waveIdx = Math.floor(
-    (startOffsetMin / (startWindowMin || 1)) * waveCount,
-  );
+  const waveIdx = Math.floor((startOffsetMin / (startWindowMin || 1)) * waveCount);
   const t = Math.min(1, Math.max(0, waveIdx / (waveCount - 1 || 1)));
-  // Hot (early) → cool (late): red-orange → yellow-green → blue.
   const r = Math.round(255 * (1 - t * 0.7));
   const g = Math.round(180 * (1 - Math.abs(t - 0.5) * 2) + 60);
   const b = Math.round(100 + t * 155);
   return [r, g, b];
 }
 
-// Special marker colors
-const SCHLUSSLAEUFER_COLOR: [number, number, number] = [255, 200, 50]; // ⚠️ yellow
-const VORLAEUFER_COLOR: [number, number, number] = [255, 255, 255];     // ⬜ white
+const SCHLUSSLAEUFER_COLOR: [number, number, number] = [255, 200, 50];
+const VORLAEUFER_COLOR: [number, number, number] = [255, 255, 255];
 
-// Bright palette for user-created walkers (distinct from band colors)
 const USER_WALKER_COLORS: Array<[number, number, number]> = [
-  [0, 255, 255],   // cyan
-  [255, 0, 255],   // magenta
-  [255, 255, 0],   // yellow
-  [0, 255, 128],   // spring green
-  [255, 128, 0],   // orange
-  [128, 0, 255],   // purple
-  [255, 80, 80],   // coral
-  [80, 255, 80],   // lime
-  [255, 128, 255], // pink
-  [128, 255, 255], // aqua
+  [0, 255, 255],
+  [255, 0, 255],
+  [255, 255, 0],
+  [0, 255, 128],
+  [255, 128, 0],
+  [128, 0, 255],
+  [255, 80, 80],
+  [80, 255, 80],
+  [255, 128, 255],
+  [128, 255, 255],
 ];
+
+// ---- Layer construction ------------------------------------------------------
 
 function makeLayers(
   route: Route,
@@ -860,7 +858,6 @@ function makeLayers(
     PathLayer | ScatterplotLayer | TripsLayer<Trip> | TripsLayer<import("./replay").ReplayTripData>
   > = [];
 
-  // Base route.
   layers.push(
     new PathLayer({
       id: "route",
@@ -872,11 +869,9 @@ function makeLayers(
     }),
   );
 
-  // ---- Walker color helper ------------------------------------------------
   function walkerColor(trip: Trip): [number, number, number] {
     if (trip.walker.bandId === -1) return SCHLUSSLAEUFER_COLOR;
     if (trip.walker.bandId === -2) return VORLAEUFER_COLOR;
-    // User-created walkers get their own bright color.
     if (trip.walker.isReal && trip.walker.bandId >= 0) {
       const ci = uwColorIdx.get(trip.walker.id);
       if (ci !== undefined) {
@@ -886,7 +881,6 @@ function makeLayers(
     return BAND_COLORS[trip.walker.bandId] ?? [150, 150, 150];
   }
 
-  // Filler walker trails (currently user walkers + Schluss/Vor).
   if (trips.length > 0) {
     layers.push(
       new TripsLayer<Trip>({
@@ -924,7 +918,6 @@ function makeLayers(
           return [d.path[0][0], d.path[0][1], 0];
         },
         getRadius: (d: Trip) => {
-          // Schlussläufer and Vorläufer get larger dots.
           if (d.walker.bandId < 0) return 1000;
           return d.walker.isReal ? 600 : 300;
         },
@@ -950,9 +943,8 @@ function makeLayers(
     );
   }
 
-  // ---- Replay layers -------------------------------------------------------
+  // Replay layers.
   if (replayTrips.length > 0) {
-    // Trail layer for replay tracks.
     layers.push(
       new TripsLayer<import("./replay").ReplayTripData>({
         id: "replay-trail",
@@ -969,7 +961,6 @@ function makeLayers(
       }),
     );
 
-    // Head dots for replay tracks.
     layers.push(
       new ScatterplotLayer<ReplayHead>({
         id: "replay-heads",
@@ -991,7 +982,6 @@ function makeLayers(
     );
   }
 
-  // ---- Filler walker dots (fast path — no trails) -------------------------
   if (fillerHeads.length > 0) {
     layers.push(
       new ScatterplotLayer<FillerHead>({
@@ -1005,7 +995,7 @@ function makeLayers(
         getFillColor: (d) => {
           if (d.status === "pre-start") return [255, 255, 255, 0];
           if (d.status === "dnf") return [80, 40, 40, 120];
-          if (d.status === "bus") return [100, 200, 255, 200]; // blue for bus riders
+          if (d.status === "bus") return [100, 200, 255, 200];
           if (d.status === "finished") return [200, 200, 200, 120];
           return [...d.color, 160];
         },
@@ -1018,7 +1008,7 @@ function makeLayers(
   return layers;
 }
 
-// ---- Histogram of walkers along the route ----------------------------------
+// ---- Histogram ---------------------------------------------------------------
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -1034,7 +1024,6 @@ function updateHistogram(
   replayMode: ReplayMode,
   replayTrips: ReplayTripData[],
 ) {
-  // Bin walkers (cohort + user) into 1-km buckets.
   const bins = new Array<number>(ROUTE_KM).fill(0);
   let maxBin = 0;
   const tally = (w: Walker) => {
@@ -1049,7 +1038,6 @@ function updateHistogram(
 
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
-  // Background route line.
   const baseLine = document.createElementNS(SVG_NS, "rect");
   baseLine.setAttribute("x", "0");
   baseLine.setAttribute("y", "28");
@@ -1058,7 +1046,6 @@ function updateHistogram(
   baseLine.setAttribute("fill", "#30363d");
   svg.appendChild(baseLine);
 
-  // Histogram bars.
   if (maxBin > 0) {
     for (let i = 0; i < ROUTE_KM; i++) {
       if (bins[i] === 0) continue;
@@ -1073,7 +1060,6 @@ function updateHistogram(
     }
   }
 
-  // VPS waypoint ticks.
   for (const wp of route.waypoints) {
     const tick = document.createElementNS(SVG_NS, "line");
     tick.setAttribute("x1", String(wp.cumKm));
@@ -1085,7 +1071,6 @@ function updateHistogram(
     svg.appendChild(tick);
   }
 
-  // Finish marker.
   const finish = document.createElementNS(SVG_NS, "line");
   finish.setAttribute("x1", "100");
   finish.setAttribute("y1", "22");
@@ -1095,7 +1080,6 @@ function updateHistogram(
   finish.setAttribute("stroke-width", "0.7");
   svg.appendChild(finish);
 
-  // Schlussläufer marker.
   const sSnap = snapshotAt(schluss, route, tHours);
   if (sSnap.status === "walking" || sSnap.status === "finished") {
     const sx = Math.min(100, sSnap.km);
@@ -1110,7 +1094,6 @@ function updateHistogram(
     svg.appendChild(sLine);
   }
 
-  // Vorläufer marker.
   const vSnap = snapshotAt(vor, route, tHours);
   if (vSnap.status === "walking" || vSnap.status === "finished") {
     const vx = Math.min(100, vSnap.km);
@@ -1125,7 +1108,6 @@ function updateHistogram(
     svg.appendChild(vLine);
   }
 
-  // User walker dots.
   for (const uw of userWalkers) {
     const uSnap = snapshotAt(uw, route, tHours);
     if (uSnap.status === "pre-start" || uSnap.status === "dnf") continue;
@@ -1140,7 +1122,6 @@ function updateHistogram(
     svg.appendChild(dot);
   }
 
-  // Replay track markers (small colored diamonds).
   for (const rt of replayTrips) {
     let os = 0;
     if (replayMode === "time-aligned") {
@@ -1162,7 +1143,7 @@ function updateHistogram(
   }
 }
 
-// ---- User walker creation + persistence -------------------------------------
+// ---- User walker helpers -----------------------------------------------------
 
 function createUserWalker(
   id: string,
@@ -1180,41 +1161,6 @@ function createUserWalker(
     dnfKm: null,
     isReal: true,
   };
-}
-
-function loadSavedWalkers(): SavedWalker[] {
-  // Migrate old single-walker format to array.
-  try {
-    const raw = localStorage.getItem("megamarsch-sim:my-walker:v1");
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (typeof parsed?.name === "string" && typeof parsed?.bandId === "number") {
-        const migrated: SavedWalker[] = [
-          { id: `uw-${Date.now()}`, name: parsed.name, bandId: parsed.bandId },
-        ];
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
-        localStorage.removeItem("megamarsch-sim:my-walker:v1");
-        return migrated;
-      }
-    }
-  } catch { /* fall through */ }
-
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed.filter(
-        (item: unknown) =>
-          typeof (item as SavedWalker)?.id === "string" &&
-          typeof (item as SavedWalker)?.name === "string" &&
-          typeof (item as SavedWalker)?.bandId === "number",
-      );
-    }
-  } catch {
-    // fall through
-  }
-  return [];
 }
 
 function statusLabel(s: "pre-start" | "walking" | "finished" | "dnf"): string {
@@ -1291,9 +1237,7 @@ function selectBand(id: number) {
     byId<HTMLInputElement>("signup-name").value.trim().length === 0;
 }
 
-function showSignup(prefill: SavedWalker | null) {
-  // Track which walker we're editing (null = adding new).
-  // editingWalkerId is set by the caller before calling showSignup.
+function showSignup(prefill: { id: string; name: string; bandId: number } | null) {
   byId<HTMLElement>("signup-overlay").hidden = false;
   const nameInput = byId<HTMLInputElement>("signup-name");
   if (prefill) {
@@ -1373,7 +1317,6 @@ function formatHM(sec: number): string {
 }
 
 function formatClock(eventStartEpoch: number, simSec: number): string {
-  // Munich is CEST (UTC+2) in May. Display local event time.
   const CEST_OFFSET_MS = 2 * 3600 * 1000;
   const d = new Date(eventStartEpoch + simSec * 1000 + CEST_OFFSET_MS);
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -1389,7 +1332,6 @@ function escapeHtml(s: string): string {
   return div.innerHTML;
 }
 
-// Suppress unused-warning for BANDS/SVG_NS — kept for future use.
 void BANDS;
 
 main().catch((e) => {

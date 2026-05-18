@@ -132,7 +132,7 @@ export function syntheticRoute(): Route {
 /** Load /route.gpx if present; fall back to synthetic. */
 export async function loadRoute(): Promise<Route> {
   try {
-    const res = await fetch("/route.gpx");
+    const res = await fetch(`${import.meta.env.BASE_URL}route.gpx`);
     if (!res.ok) throw new Error("no gpx");
     const text = await res.text();
     const xml = new DOMParser().parseFromString(text, "application/xml");

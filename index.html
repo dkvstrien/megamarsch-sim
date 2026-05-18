@@ -148,6 +148,24 @@
       .uw-edit:hover { color: #58a6ff; }
       .uw-remove:hover { color: #f85149; }
       .uw-empty { font-size: 11px; color: #484f58; font-style: italic; padding: 4px 0; }
+      /* Add participant modal */
+      .modal-overlay {
+        position: absolute; inset: 0; z-index: 100;
+        background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .modal-overlay[hidden] { display: none; }
+      .modal-card {
+        background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+        padding: 24px; color: #e6edf3; width: min(400px, 90vw);
+      }
+      .add-option {
+        display: block; width: 100%; padding: 10px 14px; margin: 6px 0;
+        background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+        border-radius: 8px; font-size: 13px; cursor: pointer;
+        font-family: inherit; text-align: left; box-sizing: border-box;
+      }
+      .add-option:hover { border-color: #58a6ff; background: rgba(88,166,255,0.08); }
       /* Toggle switch */
       .toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px; }
       .toggle-switch input { opacity: 0; width: 0; height: 0; }
@@ -254,16 +272,10 @@
       <div class="stat"><span>Sim clock</span><b id="stat-clock">—</b></div>
       <div id="my-walker-card">
         <div class="uw-header">
-          <span class="uw-header-label">Your Walkers</span>
-          <button id="add-walker-btn" type="button" title="Add walker">+</button>
+          <span class="uw-header-label">Participants</span>
+          <button id="add-participant-btn" type="button" title="Add participant">+</button>
         </div>
-        <div id="user-walker-list"></div>
-      </div>
-      <div class="panel-section">
-        <div class="uw-header">
-          <span class="uw-header-label">Import Data</span>
-        </div>
-        <a href="/strava-bookmarklet.html" target="_blank" id="strava-help-btn" style="display:block;width:100%;margin-top:4px;text-align:center;text-decoration:none;background:#21262d;color:#58a6ff;border:1px solid #30363d;padding:5px 10px;border-radius:6px;font-size:11px;cursor:pointer;font-weight:600;box-sizing:border-box">📡 Import from Strava</a>
+        <div id="participant-list"></div>
       </div>
       <div class="panel-section">
         <div class="uw-header">
@@ -287,18 +299,23 @@
         </div>
       </div>
       <div id="replay-section">
-        <div class="replay-header">Replay Tracks</div>
         <div class="replay-toolbar">
-          <button id="replay-upload-btn" type="button">📎 Upload GPX</button>
           <label class="replay-mode"><input type="radio" name="replay-mode" id="replay-mode-sbs" checked /> Side‑by‑side</label>
           <label class="replay-mode"><input type="radio" name="replay-mode" id="replay-mode-aligned" /> Time‑aligned</label>
         </div>
         <div id="replay-error" hidden></div>
-        <div id="replay-list"></div>
-        <div id="replay-empty">No tracks loaded. Upload GPX files from the event.</div>
       </div>
     </div>
     <input type="file" id="replay-file-input" multiple hidden />
+    <div id="add-modal" hidden class="modal-overlay">
+      <div class="modal-card" style="width:280px">
+        <h2 style="margin:0 0 12px">Add Participant</h2>
+        <button class="add-option" id="add-upload-btn">📎 Upload GPX file</button>
+        <button class="add-option" id="add-generate-btn">🧑 Generate walker</button>
+        <a href="./strava-bookmarklet.html" target="_blank" class="add-option" style="text-decoration:none;display:block;text-align:center">📡 Import from Strava</a>
+        <button class="add-option" id="add-close-btn" style="color:#8b949e;margin-top:8px">Cancel</button>
+      </div>
+    </div>
     <div id="signup-overlay" hidden>
       <div id="signup-card">
         <h2>Send a walker on the Megamarsch</h2>
