@@ -11,6 +11,7 @@ dist/
 src/**/*.js
 src/**/*.js.map
 src/**/*.d.ts
+!src/vite-env.d.ts
 
 megamarch data/
 *.gpx
